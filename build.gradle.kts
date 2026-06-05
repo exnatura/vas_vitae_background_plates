@@ -46,16 +46,18 @@ tasks.register("generatePlates") {
                     continue
                 }
 
-                // og:title — strip trailing " | Flickr"
-                val title = doc.select("meta[property=og:title]").attr("content")
-                    .removeSuffix(" | Flickr").trim()
-
                 // og:url — canonical page URL
                 val canonicalUrl = doc.select("meta[property=og:url]").attr("content")
                     .ifBlank { pageUrl }
 
                 // og:description — bibliographic source text
                 val source = doc.select("meta[property=og:description]").attr("content").trim()
+
+                // og:title — strip trailing " | Flickr". Flickr auto-upload titles are
+                // filenames (e.g. "n121_w1150"); derive a real title from the citation.
+                val rawTitle = doc.select("meta[property=og:title]").attr("content")
+                    .removeSuffix(" | Flickr").trim()
+                val title = derivePlateTitle(rawTitle, source)
 
                 // JSON-LD (schema.org ImageObject) → author name + license
                 var author = ""
@@ -69,6 +71,20 @@ tasks.register("generatePlates") {
                             val l = ld.optString("license", "")
                             if (l.isNotEmpty()) license = resolveLicense(l)
                         }
+                    }
+                }
+
+                // Fallbacks when JSON-LD is missing/absent. Author: the actual photo
+                // owner from the page URL (these are biodivlibrary's faves, so the owner
+                // may be anyone). License: the page's rel=license link, else "no known
+                // copyright restrictions" only for known Flickr Commons members.
+                if (author.isBlank()) author = fallbackAuthor(pageUrl)
+                if (license.isBlank()) {
+                    val relLicense = doc.select("a[rel=license]").attr("abs:href")
+                    license = when {
+                        relLicense.isNotBlank() -> resolveLicense(relLicense)
+                        isCommonsOwner(pageUrl) -> "No known copyright restrictions"
+                        else -> ""
                     }
                 }
 
@@ -110,4 +126,39 @@ fun resolveLicense(url: String): String = when {
 fun ccLabel(prefix: String, url: String): String {
     val version = Regex("""/(\d+\.\d+)/""").find(url)?.groupValues?.get(1) ?: return prefix
     return "$prefix $version"
+}
+
+// Flickr Commons members whose plates carry "No known copyright restrictions".
+val commonsOwners = setOf("biodivlibrary")
+
+/** The owner slug from a Flickr photo URL: flickr.com/photos/<owner>/<id>. */
+fun ownerSlug(pageUrl: String): String =
+    pageUrl.substringAfter("/photos/", "").substringBefore('/')
+
+/** A display author when JSON-LD has none: a known name for the owner, else the slug. */
+fun fallbackAuthor(pageUrl: String): String = when (val owner = ownerSlug(pageUrl)) {
+    "biodivlibrary", "" -> "Biodiversity Heritage Library"
+    else -> owner
+}
+
+fun isCommonsOwner(pageUrl: String): Boolean = ownerSlug(pageUrl) in commonsOwners
+
+// BHL/Flickr auto-upload titles look like "n121_w1150" — meaningless to show.
+val filenameTitleRegex = Regex("""^[a-z]?\d+(_w\d+)?$""", RegexOption.IGNORE_CASE)
+
+/**
+ * A human title for a plate. When the Flickr title is a filename, derive the book
+ * name from the start of the BHL citation (reads "<Title>, … <Place> :<Publisher>,…"),
+ * falling back to a generic label. Mirrors PlateInfo.displayTitle in the app so the
+ * manifest ships clean titles and the app's heuristic is just a safety net.
+ */
+fun derivePlateTitle(rawTitle: String, source: String): String {
+    val t = rawTitle.trim()
+    if (t.isNotBlank() && !filenameTitleRegex.matches(t)) return t
+    val src = source.trim()
+    if (src.isEmpty()) return "Botanical plate"
+    val beforeColon = src.substringBefore(" :").trim()
+    val beforeComma = src.substringBefore(", ").trim()
+    val name = listOf(beforeColon, beforeComma).filter { it.isNotEmpty() }.minByOrNull { it.length }
+    return name?.take(80)?.ifBlank { null } ?: "Botanical plate"
 }
