@@ -1,0 +1,9 @@
+.gradle/
+build/
+
+# Generated output — commit intentionally
+# plates.json
+
+.idea/
+*.iml
+local.properties
