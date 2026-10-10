@@ -46,3 +46,42 @@ to that URL. While it's blank the app just keeps the bundled plate overlay.
 The faves list (e.g. `flickr.com/photos/biodivlibrary/faves`) can be turned into a
 manifest with a one-off script — ask Claude to write one. It does **not** need the
 paid API: the static image URLs and photo pages are public.
+
+## Full searchable catalogue (`pipeline/`)
+
+`plates.json` above is a hand-picked gallery. The scripts in `pipeline/` instead build
+`build/plates.db`, a SQLite database of every BHL plate on Flickr with books, authors,
+scientific names, common tags, popularity and a full-text search index. Each script's
+docstring describes its inputs, outputs and tables. Run them in this order:
+
+```sh
+python3 pipeline/crawl_flickr.py          # ~2.5 h, resumable  -> data/flickr/
+curl -L -o data/bhl/data.zip https://www.biodiversitylibrary.org/data/data.zip
+curl -L -C - -o data/gbif/simple.txt.gz \
+  https://hosted-datasets.gbif.org/datasets/backbone/current/simple.txt.gz   # drops often; re-run until complete
+python3 pipeline/build_stage.py           # ~20 min            -> data/stage.db
+python3 pipeline/resolve_taxa.py          # scientific names per plate
+python3 pipeline/tag_plates.py            # common tags + exclusions
+data/venv/bin/python pipeline/classify_images.py   # hours; optional image-based exclusions
+python3 pipeline/tag_plates.py            # again, to apply the image scores
+python3 pipeline/build_app_db.py          # -> build/plates.db (+ .gz)
+```
+
+Everything is standard-library Python except `classify_images.py`, which needs
+`torch`, `open_clip_torch` and `pillow` (CPU builds are fine) in `data/venv`.
+`data/` and `build/` are git-ignored.
+
+### Publishing a new catalogue
+
+`build_app_db.py` also writes `catalog.json`, which the app fetches (next to
+`plates.json`) to learn the current version, download URL, size and checksum. To
+publish a build, upload the database as a release asset and commit the pointer:
+
+```sh
+gh release create catalog-<version> build/plates.db.gz --title "Plate catalogue <version>"
+git add catalog.json && git commit -m "Catalogue <version>" && git push
+```
+
+Create the release first: once `catalog.json` is on `main`, apps start downloading from
+its URL. Rebuilding changes the checksum, so always publish the `.gz` from the same
+build that wrote `catalog.json`.
